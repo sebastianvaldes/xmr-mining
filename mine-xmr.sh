@@ -205,7 +205,7 @@ if (( mem_mb < min_mb )); then
   echo "  (${need_mb} MB reserved for XMRig + ~1.5 GB for the operating system)"
   echo
   echo "  ${C_WARN}→ Assign at least ${rec_gb} GB of RAM to the VM and run the command again.${C_0}"
-  echo "  Nothing was changed on this machine."
+  echo "  No system changes were made (only this run's log was written to $INSTALL_DIR)."
   exit 1
 fi
 if (( gb_pages > 0 )); then
