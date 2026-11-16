@@ -1,0 +1,22 @@
+{
+  "autosave": false,
+  "colors": true,
+  "donate-level": 1,
+  "donate-over-proxy": 1,
+  "cpu": {
+    "enabled": true,
+    "huge-pages": true
+  },
+  "randomx": {
+    "1gb-pages": true
+  },
+  "pools": [
+    {
+      "url": "br.monero.herominers.com:1111",
+      "algo": "rx/0",
+      "user": "44Ts4YmfwCuBk7Uw3ZpvjGcdrxAV1NZudSfuy8PWyctzYCsfDqKgfJP4zr6QBgwHoTASnkqzJazf9hY5KkqZXWcf259zGxX.{{WORKER}}",
+      "keepalive": true,
+      "tls": false
+    }
+  ]
+}

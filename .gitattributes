@@ -1,0 +1,4 @@
+# Forzar finales de línea Unix (LF): los scripts bash fallan con CRLF de Windows
+* text=auto eol=lf
+*.sh text eol=lf
+*.json text eol=lf
