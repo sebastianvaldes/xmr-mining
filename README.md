@@ -29,6 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/min
 7. Starts the service and follows its log live:
    - **Connected**: keeps mining. Asks to reboot only when needed (kernel updated or huge pages just configured).
    - **Error**: disables the service, restores the previous XMRig binary and `config.json`, and shows the errors.
+   - **Nothing changed** (same XMRig version, config, profile and service) and the service is running: it is not restarted and the backup is left untouched.
 
 ## Configuration and pool profiles
 
