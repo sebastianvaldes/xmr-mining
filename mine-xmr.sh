@@ -482,6 +482,8 @@ ok "enabled at boot"
 
 # =============================================================================
 #  7. Test: start the service and follow its log live
+#     Passes when XMRig connects to the pool AND the miner reports READY
+#     (after allocating huge pages). Huge pages below 100% only warn.
 # =============================================================================
 step "Testing the service"
 systemctl stop "$SERVICE_NAME" >>"$LOG" 2>&1 || true
@@ -493,12 +495,18 @@ exec {JFD}< <(timeout "$TEST_TIMEOUT" journalctl -u "$SERVICE_NAME" --since "$si
 JPID=$!
 result="timeout"
 error_lines=()
+connected=0; ready=0
+t_conn=0; t_ready=0
+hp_rx=""                  # % huge pages for the RandomX dataset/cache
+hp_cpu=""                 # % huge pages for the mining threads
 t0=$SECONDS
 shopt -s nocasematch
 re_ok='new job from'
+re_ready='READY threads'
 re_err='(connect|login|read|dns|tls|socket) error|no active pools|unable to open|no valid configuration|main process exited|failed with result|illegal instruction|segmentation fault|core dumped'
-re_warn='failed|0%|unavailable|disabled|cannot|not supported'
-re_show='huge pages|1gb pages|msr|use pool|randomx .*(allocated|init)|cpu .*threads'
+re_warn='failed|unavailable|disabled|cannot|not supported'
+re_show='huge pages|1gb pages|msr|use pool|randomx .*(allocated|init)|ready threads'
+re_pct='huge pages ([0-9]+)%'
 
 while true; do
   if IFS= read -r -t 1 -u "$JFD" line; then
@@ -507,22 +515,56 @@ while true; do
     if [[ $line =~ $re_err ]]; then
       error_lines+=("$line"); result="error"; break
     elif [[ $line =~ $re_ok ]]; then
-      info "$line"; result="ok"; break
+      if (( ! connected )); then
+        connected=1; t_conn=$((SECONDS - t0)); info "$line"
+      fi
     elif [[ $line =~ $re_show ]]; then
-      if [[ $line =~ $re_warn ]]; then warn "$line"; else info "$line"; fi
+      pct=""
+      [[ $line =~ $re_pct ]] && pct=${BASH_REMATCH[1]}
+      [[ $line =~ randomx.*allocated ]] && hp_rx=$pct
+      if [[ $line =~ $re_ready ]]; then
+        ready=1; t_ready=$((SECONDS - t0)); hp_cpu=$pct
+      fi
+      if [[ $line =~ $re_warn ]] || [[ -n $pct && $pct -lt 100 ]]; then warn "$line"; else info "$line"; fi
     fi
+    if (( connected && ready )); then result="ok"; break; fi
   else
     (( $? > 128 )) || break        # EOF: the timeout was reached
   fi
-  progress "waiting for pool connection ($((SECONDS - t0))s)"
+  if (( connected )); then
+    progress "connected, waiting for the miner to start ($((SECONDS - t0))s)"
+  else
+    progress "waiting for pool connection ($((SECONDS - t0))s)"
+  fi
 done
 shopt -u nocasematch
 kill "$JPID" 2>/dev/null || true
 exec {JFD}<&-
 
+# Lowest huge pages percentage reported (empty if XMRig did not report it).
+hp_min=""
+for v in "$hp_rx" "$hp_cpu"; do
+  [[ -n $v ]] && { [[ -z $hp_min ]] || (( v < hp_min )); } && hp_min=$v
+done
+printf 'test: result=%s connected=%s ready=%s hp_rx=%s hp_cpu=%s\n' \
+  "$result" "$connected" "$ready" "$hp_rx" "$hp_cpu" >>"$LOG"
+
+if [[ $result == timeout ]] && (( connected )); then
+  result="not_ready"
+fi
+
 case $result in
   ok)
-    ok "connected to the pool in $((SECONDS - t0))s"
+    if [[ -n $hp_min ]] && (( hp_min < 100 )); then
+      ok_warn "connected in ${t_conn}s, mining in ${t_ready}s, but huge pages only ${hp_min}%"
+      REBOOT_REASONS+=("XMRig got only ${hp_min}% of the huge pages (lower hashrate); a reboot usually fixes it")
+    else
+      ok "connected in ${t_conn}s, mining in ${t_ready}s, huge pages ${hp_min:-?}%"
+    fi
+    ;;
+  not_ready)
+    ok_warn "connected in ${t_conn}s, but the miner did not report READY within ${TEST_TIMEOUT}s"
+    warn "Check it later with: journalctl -fu $SERVICE_NAME"
     ;;
   *)
     if [[ $result == timeout ]]; then
@@ -531,8 +573,10 @@ case $result in
       fail_step "error detected"
     fi
     echo
-    echo "  ${C_ERR}Errors found:${C_0}"
-    for l in "${error_lines[@]}"; do echo "    $l"; done
+    if (( ${#error_lines[@]} )); then
+      echo "  ${C_ERR}Errors found:${C_0}"
+      for l in "${error_lines[@]}"; do echo "    $l"; done
+    fi
     echo "  Last lines from the service:"
     journalctl -u "$SERVICE_NAME" --since "$since" -n 15 -o cat --no-pager 2>/dev/null \
       | sed 's/\x1b\[[0-9;]*m//g; s/^/    /'
