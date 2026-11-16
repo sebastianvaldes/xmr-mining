@@ -3,7 +3,7 @@
 #  XMR Mining - instala o actualiza XMRig como servicio systemd (Ubuntu x64)
 #
 #  Uso (en la máquina a instalar/actualizar):
-#    curl -fsSL https://raw.githubusercontent.com/CAMBIAR_USUARIO/xmr-mining/main/mine-xmr.sh | sudo bash
+#    curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash
 #
 #  Qué hace:
 #    1. Actualiza el sistema operativo (apt)
@@ -19,7 +19,7 @@
 set -Eeuo pipefail
 
 # ---------- Configuración -----------------------------------------------------
-REPO_RAW="${XMR_REPO_RAW:-https://raw.githubusercontent.com/CAMBIAR_USUARIO/xmr-mining/main}"
+REPO_RAW="${XMR_REPO_RAW:-https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main}"
 CONFIG_TEMPLATE_URL="$REPO_RAW/config/xmrig.json"
 
 INSTALL_DIR="/opt/xmrig"

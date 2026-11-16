@@ -7,7 +7,7 @@ Instala o actualiza [XMRig](https://github.com/xmrig/xmrig) como servicio system
 En la máquina a instalar o actualizar:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CAMBIAR_USUARIO/xmr-mining/main/mine-xmr.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash
 ```
 
 El mismo comando sirve para la primera instalación y para actualizar. El script no queda guardado en la máquina.
