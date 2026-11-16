@@ -1,4 +1,4 @@
-# Forzar finales de línea Unix (LF): los scripts bash fallan con CRLF de Windows
+# Force Unix line endings (LF): bash scripts break with Windows CRLF
 * text=auto eol=lf
 *.sh text eol=lf
 *.json text eol=lf

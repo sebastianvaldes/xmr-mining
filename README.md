@@ -1,60 +1,60 @@
 # XMR Mining
 
-Instala o actualiza [XMRig](https://github.com/xmrig/xmrig) como servicio systemd en Ubuntu x64, con un solo comando.
+Installs or updates [XMRig](https://github.com/xmrig/xmrig) as a systemd service on Ubuntu x64, with a single command.
 
-## Uso
+## Usage
 
-En la máquina a instalar o actualizar:
+On the machine to install or update:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash
 ```
 
-El mismo comando sirve para la primera instalación y para actualizar. El script no queda guardado en la máquina.
+The same command works for the first install and for updates. The script is not stored on the machine.
 
-## Qué hace
+## What it does
 
-1. Verifica que haya RAM suficiente (si no, indica cuánta asignar a la VM y no toca nada).
-1. Actualiza el sistema operativo (`apt update` + `apt upgrade`).
-2. Descarga la última versión de XMRig publicada en GitHub y verifica su SHA256 (si ya está instalada, no la vuelve a bajar).
-3. Genera `/opt/xmrig/config.json` a partir de [`config/xmrig.json`](config/xmrig.json). El worker es el hostname en mayúsculas.
-4. Configura huge pages (2MB vía sysctl y 1GB vía parámetro de kernel en GRUB) y el módulo MSR.
-5. Crea y habilita `xmrig.service`.
-6. Arranca el servicio y sigue el log en vivo:
-   - **Conexión OK**: queda minando. Pide reiniciar solo si hace falta (kernel actualizado o huge pages recién configuradas).
-   - **Error**: deshabilita el servicio, restaura la versión anterior de XMRig y `config.json`, y muestra los errores.
+1. Checks there is enough RAM. If not, it says how much to assign to the VM and changes nothing.
+2. Updates the operating system (`apt update` + `apt upgrade`).
+3. Downloads the latest XMRig release from GitHub and verifies its SHA256 (skipped if already installed).
+4. Builds `/opt/xmrig/config.json` from [`config/xmrig.json`](config/xmrig.json). The worker is the hostname in uppercase.
+5. Configures huge pages (2MB via sysctl and 1GB via a GRUB kernel parameter) and the MSR module.
+6. Creates and enables `xmrig.service`.
+7. Starts the service and follows its log live:
+   - **Connected**: keeps mining. Asks to reboot only when needed (kernel updated or huge pages just configured).
+   - **Error**: disables the service, restores the previous XMRig binary and `config.json`, and shows the errors.
 
-## Cambiar pool, wallet o donación
+## Changing pool, wallet or donation
 
-Editar [`config/xmrig.json`](config/xmrig.json) y hacer commit. La próxima vez que se ejecute el comando en cada máquina, toma la configuración nueva.
+Edit [`config/xmrig.json`](config/xmrig.json) and commit. The next time the command runs on each machine, it picks up the new configuration.
 
-- `{{WORKER}}` se reemplaza por el hostname en mayúsculas.
-- `donate-level`: porcentaje donado a los desarrolladores de XMRig (mínimo 1).
-- Opciones disponibles: <https://xmrig.com/docs/miner/config>
+- `{{WORKER}}` is replaced with the hostname in uppercase.
+- `donate-level`: percentage donated to the XMRig developers (minimum 1).
+- Available options: <https://xmrig.com/docs/miner/config>
 
-## Archivos en la máquina
+## Files on the machine
 
-| Ruta | Contenido |
+| Path | Contents |
 |---|---|
-| `/opt/xmrig/xmrig` | Binario de XMRig |
-| `/opt/xmrig/config.json` | Configuración generada |
-| `/opt/xmrig/backup/` | Versión anterior (binario + config) |
-| `/etc/systemd/system/xmrig.service` | Servicio |
-| `/etc/sysctl.d/99-xmrig-hugepages.conf` | Huge pages de 2MB |
-| `/etc/default/grub.d/99-xmrig-hugepages.cfg` | Huge pages de 1GB |
-| `/etc/modules-load.d/xmrig-msr.conf` | Carga del módulo MSR |
-| `/opt/xmrig/AAAA-MM-DD-xmr-mining-install.log` | Logs del instalador (se conservan los últimos 20) |
+| `/opt/xmrig/xmrig` | XMRig binary |
+| `/opt/xmrig/config.json` | Generated configuration |
+| `/opt/xmrig/backup/` | Previous version (binary + config) |
+| `/opt/xmrig/YYYY-MM-DD-xmr-mining-install.log` | Installer logs (last 20 kept) |
+| `/etc/systemd/system/xmrig.service` | Service |
+| `/etc/sysctl.d/99-xmrig-hugepages.conf` | 2MB huge pages |
+| `/etc/default/grub.d/99-xmrig-hugepages.cfg` | 1GB huge pages |
+| `/etc/modules-load.d/xmrig-msr.conf` | Loads the MSR module |
 
-## Comandos útiles
+## Useful commands
 
 ```bash
-journalctl -fu xmrig          # log en vivo
-systemctl status xmrig        # estado
-sudo systemctl stop xmrig     # detener
-sudo systemctl disable xmrig  # no arrancar al inicio
+journalctl -fu xmrig          # live log
+systemctl status xmrig        # status
+sudo systemctl stop xmrig     # stop
+sudo systemctl disable xmrig  # don't start at boot
 ```
 
-## Desinstalar
+## Uninstall
 
 ```bash
 sudo systemctl disable --now xmrig

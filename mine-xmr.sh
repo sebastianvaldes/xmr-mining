@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  XMR Mining - instala o actualiza XMRig como servicio systemd (Ubuntu x64)
+#  XMR Mining - installs or updates XMRig as a systemd service (Ubuntu x64)
 #
-#  Uso (en la máquina a instalar/actualizar):
+#  Usage (on the machine to install/update):
 #    curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash
 #
-#  Qué hace:
-#    1. Actualiza el sistema operativo (apt)
-#    2. Descarga la última versión de XMRig publicada en GitHub (verifica SHA256)
-#    3. Genera /opt/xmrig/config.json desde la plantilla del repo (worker = hostname)
-#    4. Configura huge pages (2MB y 1GB) y el módulo MSR
-#    5. Crea/actualiza y habilita el servicio xmrig.service
-#    6. Prueba el servicio siguiendo el log en vivo
-#       - OK    -> queda corriendo; pide reiniciar solo si hace falta
-#       - Error -> deshabilita el servicio, restaura la versión anterior e informa
+#  What it does:
+#    0. Checks CPU and RAM before changing anything
+#    1. Updates the operating system (apt)
+#    2. Downloads the latest XMRig release from GitHub (verifies SHA256)
+#    3. Builds /opt/xmrig/config.json from the repo template (worker = hostname)
+#    4. Configures huge pages (2MB and 1GB) and the MSR module
+#    5. Creates/updates and enables xmrig.service
+#    6. Tests the service by following its log live
+#       - OK    -> keeps running; asks to reboot only when needed
+#       - Error -> disables the service, restores the previous version and reports
 # =============================================================================
 
 set -Eeuo pipefail
 
-# ---------- Configuración -----------------------------------------------------
+# ---------- Settings ----------------------------------------------------------
 REPO_RAW="${XMR_REPO_RAW:-https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main}"
 CONFIG_TEMPLATE_URL="$REPO_RAW/config/xmrig.json"
 
@@ -30,18 +31,18 @@ SYSCTL_FILE="/etc/sysctl.d/99-xmrig-hugepages.conf"
 GRUB_FILE="/etc/default/grub.d/99-xmrig-hugepages.cfg"
 MODULES_FILE="/etc/modules-load.d/xmrig-msr.conf"
 LOG="$INSTALL_DIR/$(date +%F)-xmr-mining-install.log"
-LOG_KEEP=20               # cantidad de logs del instalador que se conservan
+LOG_KEEP=20               # number of installer logs to keep
 
 XMRIG_API="https://api.github.com/repos/xmrig/xmrig/releases/latest"
-TEST_TIMEOUT=60           # segundos máximos esperando conexión al pool o un error
+TEST_TIMEOUT=60           # max seconds waiting for a pool connection or an error
 
-# ---------- Estado ------------------------------------------------------------
+# ---------- State -------------------------------------------------------------
 STEP_MSG=""
-INSTALLED_NEW=0           # 1 cuando ya se reemplazaron archivos en /opt/xmrig
+INSTALLED_NEW=0           # 1 once files in /opt/xmrig have been replaced
 REBOOT_REASONS=()
 TMP=""
 
-# ---------- Salida en pantalla ------------------------------------------------
+# ---------- Screen output -----------------------------------------------------
 if [[ -t 1 ]]; then
   C_OK=$'\e[32m'; C_ERR=$'\e[31m'; C_WARN=$'\e[33m'; C_DIM=$'\e[2m'; C_B=$'\e[1m'; C_0=$'\e[0m'
   CLR=$'\r\e[K'; IS_TTY=1
@@ -49,34 +50,34 @@ else
   C_OK=""; C_ERR=""; C_WARN=""; C_DIM=""; C_B=""; C_0=""; CLR=""; IS_TTY=0
 fi
 
-# Inicia un paso: deja la línea "▶ ..." abierta hasta que se complete.
+# Starts a step: leaves the "▶ ..." line open until the step completes.
 step() {
   STEP_MSG="$1"
   printf '  %s▶%s %s...' "$C_B" "$C_0" "$STEP_MSG"
   (( IS_TTY )) || printf '\n'
   printf '\n=== %s\n' "$STEP_MSG" >>"$LOG"
 }
-# Reescribe la línea del paso en curso con un texto de progreso.
+# Rewrites the current step line with a progress text.
 progress() {
   (( IS_TTY )) && printf '%s  %s▶%s %s... %s%s%s' "$CLR" "$C_B" "$C_0" "$STEP_MSG" "$C_DIM" "$1" "$C_0"
   return 0
 }
-# Marca el paso en curso como completado (con detalle opcional).
+# Marks the current step as completed (with optional detail).
 ok() {
   printf '%s  %s✔%s %s%s\n' "$CLR" "$C_OK" "$C_0" "$STEP_MSG" "${1:+ ${C_DIM}($1)${C_0}}"
   STEP_MSG=""
 }
-# Marca el paso en curso como completado con advertencia.
+# Marks the current step as completed with a warning.
 ok_warn() {
   printf '%s  %s⚠%s %s%s\n' "$CLR" "$C_WARN" "$C_0" "$STEP_MSG" "${1:+ ${C_WARN}($1)${C_0}}"
   STEP_MSG=""
 }
-# Marca el paso en curso como fallido.
+# Marks the current step as failed.
 fail_step() {
   printf '%s  %s✖%s %s%s\n' "$CLR" "$C_ERR" "$C_0" "$STEP_MSG" "${1:+ ${C_ERR}($1)${C_0}}"
   STEP_MSG=""
 }
-# Línea informativa debajo de un paso (sin cortar el paso en curso).
+# Info line below a step (without closing the current step).
 info() {
   printf '%s      %s%s%s\n' "$CLR" "$C_DIM" "$*" "$C_0"
   [[ -n $STEP_MSG ]] && progress ""
@@ -92,7 +93,7 @@ die() {
   exit 1
 }
 
-# Ejecuta un comando largo en segundo plano mostrando el tiempo transcurrido.
+# Runs a long command in the background, showing the elapsed time.
 run() {
   local start=$SECONDS pid
   ( trap - ERR; "$@" ) >>"$LOG" 2>&1 &
@@ -104,7 +105,7 @@ run() {
   wait "$pid"
 }
 
-# Escribe un archivo solo si su contenido cambió. Devuelve 0 si lo escribió.
+# Writes a file only if its content changed. Returns 0 if it was written.
 write_if_changed() {
   local file=$1 content=$2
   if [[ -f $file ]] && [[ "$(cat "$file")" == "$content" ]]; then
@@ -115,20 +116,20 @@ write_if_changed() {
   return 0
 }
 
-# ---------- Rollback y manejo de errores --------------------------------------
+# ---------- Rollback and error handling ---------------------------------------
 rollback() {
   echo
-  echo "  Deshabilitando el inicio automático del servicio..."
+  echo "  Disabling the service autostart..."
   systemctl stop "$SERVICE_NAME" >>"$LOG" 2>&1 || true
   systemctl disable "$SERVICE_NAME" >>"$LOG" 2>&1 || true
   if [[ -f $BACKUP_DIR/xmrig || -f $BACKUP_DIR/config.json ]]; then
-    echo "  Restaurando la versión anterior de XMRig y config.json..."
+    echo "  Restoring the previous XMRig version and config.json..."
     [[ -f $BACKUP_DIR/xmrig ]]       && cp -a "$BACKUP_DIR/xmrig" "$INSTALL_DIR/xmrig"
     [[ -f $BACKUP_DIR/config.json ]] && cp -a "$BACKUP_DIR/config.json" "$INSTALL_DIR/config.json"
   fi
   echo
-  echo "  El servicio quedó ${C_B}deshabilitado${C_0}. Una vez resuelto el problema, volvé a"
-  echo "  ejecutar el comando de instalación."
+  echo "  The service is now ${C_B}disabled${C_0}. Once the problem is fixed, run the"
+  echo "  install command again."
 }
 
 on_error() {
@@ -136,9 +137,9 @@ on_error() {
   trap - ERR
   [[ -n $STEP_MSG ]] && fail_step
   echo
-  echo "${C_ERR}Falló un comando (línea $line, código $code).${C_0} Últimas líneas del log:"
+  echo "${C_ERR}A command failed (line $line, exit code $code).${C_0} Last lines of the log:"
   tail -n 20 "$LOG" 2>/dev/null | sed 's/^/    /'
-  echo "  Log completo: $LOG"
+  echo "  Full log: $LOG"
   (( INSTALLED_NEW )) && rollback
   exit 1
 }
@@ -148,42 +149,42 @@ cleanup() { [[ -n $TMP && -d $TMP ]] && rm -rf "$TMP"; return 0; }
 trap cleanup EXIT
 
 # =============================================================================
-#  Verificaciones previas
+#  Pre-flight checks
 # =============================================================================
-[[ $EUID -eq 0 ]] || die "hay que ejecutarlo como root: curl -fsSL <url> | sudo bash"
+[[ $EUID -eq 0 ]] || die "must run as root: curl -fsSL <url> | sudo bash"
 [[ -r /etc/os-release ]] && . /etc/os-release
-[[ ${ID:-} == ubuntu ]] || die "este script es solo para Ubuntu (detectado: ${PRETTY_NAME:-desconocido})"
-[[ $(uname -m) == x86_64 ]] || die "este script es solo para x86_64 (detectado: $(uname -m))"
-command -v systemctl >/dev/null || die "systemd no está disponible"
+[[ ${ID:-} == ubuntu ]] || die "this script only supports Ubuntu (detected: ${PRETTY_NAME:-unknown})"
+[[ $(uname -m) == x86_64 ]] || die "this script only supports x86_64 (detected: $(uname -m))"
+command -v systemctl >/dev/null || die "systemd is not available"
 
 export DEBIAN_FRONTEND=noninteractive
 TMP=$(mktemp -d)
 WORKER=$(hostname | tr '[:lower:]' '[:upper:]')
 mkdir -p "$INSTALL_DIR"
-# Si se ejecuta varias veces el mismo día, se agrega al log de ese día.
+# Several runs on the same day are appended to that day's log.
 printf '\n########## XMR Mining - %s - %s ##########\n' "$(date '+%F %T')" "$WORKER" >>"$LOG"
-# Conservar solo los últimos $LOG_KEEP logs del instalador.
+# Keep only the last $LOG_KEEP installer logs.
 ls -1t "$INSTALL_DIR"/*-xmr-mining-install.log 2>/dev/null | tail -n +$((LOG_KEEP + 1)) | xargs -r rm -f || true
 
 echo
-echo "${C_B}XMR Mining${C_0} - instalación / actualización de XMRig"
-echo "${C_DIM}  Equipo: $WORKER · ${PRETTY_NAME} · log: $LOG${C_0}"
+echo "${C_B}XMR Mining${C_0} - XMRig install / update"
+echo "${C_DIM}  Host: $WORKER · ${PRETTY_NAME} · log: $LOG${C_0}"
 echo
 
 APT_OPTS=(-o DPkg::Lock::Timeout=600 -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
 
 # =============================================================================
-#  0. Requisitos de hardware: se verifica antes de tocar nada
+#  0. Hardware requirements: checked before changing anything
 # =============================================================================
-step "Verificando CPU y memoria RAM"
+step "Checking CPU and RAM"
 threads=$(nproc)
 nodes=$(find /sys/devices/system/node -maxdepth 1 -name 'node[0-9]*' 2>/dev/null | wc -l)
 (( nodes > 0 )) || nodes=1
 mem_mb=$(awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo)
 
-# RandomX usa por cada nodo NUMA: dataset de 2080 MB + cache de 256 MB, y 2 MB por hilo.
-# - Con páginas de 1GB: el dataset va en 3 páginas de 1GB; cache e hilos en páginas de 2MB.
-# - Sin páginas de 1GB: todo va en páginas de 2MB.
+# Per NUMA node RandomX uses: a 2080 MB dataset + a 256 MB cache, plus 2 MB per thread.
+# - With 1GB pages: the dataset goes in 3 x 1GB pages; cache and threads in 2MB pages.
+# - Without 1GB pages: everything goes in 2MB pages.
 if grep -qw pdpe1gb /proc/cpuinfo; then
   gb_pages=$(( 3 * nodes ))
   pages_2m=$(( 128 * nodes + threads + 16 ))
@@ -191,122 +192,122 @@ else
   gb_pages=0
   pages_2m=$(( 1168 * nodes + threads + 16 ))
 fi
-need_mb=$(( gb_pages * 1024 + pages_2m * 2 ))   # RAM reservada para huge pages
-min_mb=$(( need_mb + 1536 ))                     # + margen para el sistema operativo
-rec_gb=$(( (need_mb + 2048 + 1023) / 1024 ))     # RAM a asignar a la VM (redondeada)
+need_mb=$(( gb_pages * 1024 + pages_2m * 2 ))   # RAM reserved for huge pages
+min_mb=$(( need_mb + 1536 ))                     # + headroom for the OS
+rec_gb=$(( (need_mb + 2048 + 1023) / 1024 ))     # RAM to assign to the VM (rounded up)
 printf 'threads=%s nodes=%s mem_mb=%s gb_pages=%s pages_2m=%s need_mb=%s min_mb=%s\n' \
   "$threads" "$nodes" "$mem_mb" "$gb_pages" "$pages_2m" "$need_mb" "$min_mb" >>"$LOG"
 
 if (( mem_mb < min_mb )); then
-  fail_step "RAM insuficiente"
+  fail_step "not enough RAM"
   echo
-  echo "  RAM disponible: ${C_B}${mem_mb} MB${C_0} · necesaria: ${C_B}${min_mb} MB${C_0}"
-  echo "  (${need_mb} MB reservados para XMRig + ~1.5 GB para el sistema operativo)"
+  echo "  Available RAM: ${C_B}${mem_mb} MB${C_0} · required: ${C_B}${min_mb} MB${C_0}"
+  echo "  (${need_mb} MB reserved for XMRig + ~1.5 GB for the operating system)"
   echo
-  echo "  ${C_WARN}→ Asigná al menos ${rec_gb} GB de RAM a la VM y volvé a ejecutar el comando.${C_0}"
-  echo "  No se modificó nada en el equipo."
+  echo "  ${C_WARN}→ Assign at least ${rec_gb} GB of RAM to the VM and run the command again.${C_0}"
+  echo "  Nothing was changed on this machine."
   exit 1
 fi
 if (( gb_pages > 0 )); then
-  ok "$threads hilos, $mem_mb MB de RAM, soporta páginas de 1GB"
+  ok "$threads threads, $mem_mb MB RAM, 1GB pages supported"
 else
-  ok_warn "$threads hilos, $mem_mb MB de RAM, la CPU no expone páginas de 1GB"
-  warn "En una VM, configurar el tipo de CPU como 'host' habilita las páginas de 1GB (más hashrate)."
+  ok_warn "$threads threads, $mem_mb MB RAM, CPU does not expose 1GB pages"
+  warn "On a VM, setting the CPU type to 'host' enables 1GB pages (higher hashrate)."
 fi
 
 # =============================================================================
-#  1. Sistema operativo
+#  1. Operating system
 # =============================================================================
-step "Actualizando la lista de paquetes (apt update)"
+step "Updating package lists (apt update)"
 run apt-get "${APT_OPTS[@]}" update
 ok
 
-step "Actualizando el sistema operativo (apt upgrade)"
+step "Upgrading the operating system (apt upgrade)"
 pending=$(apt-get -s --with-new-pkgs upgrade 2>/dev/null | grep -c '^Inst ' || true)
 run dpkg --configure -a
 run apt-get "${APT_OPTS[@]}" -y --with-new-pkgs upgrade
-ok "${pending:-0} paquetes actualizados"
+ok "${pending:-0} packages upgraded"
 
-step "Instalando dependencias"
+step "Installing dependencies"
 run apt-get "${APT_OPTS[@]}" -y install --no-install-recommends curl jq tar ca-certificates
 ok
 
 # =============================================================================
-#  2. XMRig: última versión publicada en GitHub
+#  2. XMRig: latest release published on GitHub
 # =============================================================================
-step "Buscando la última versión de XMRig en GitHub"
+step "Looking up the latest XMRig release on GitHub"
 release_json=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$XMRIG_API")
 latest_ver=$(jq -r '.tag_name' <<<"$release_json")
 latest_ver=${latest_ver#v}
 asset_name=$(jq -r '.assets[].name | select(test("^xmrig-.*-linux-static-x64\\.tar\\.gz$"))' <<<"$release_json" | head -n1)
 asset_url=$(jq -r --arg n "$asset_name" '.assets[] | select(.name == $n) | .browser_download_url' <<<"$release_json")
 sums_url=$(jq -r '.assets[] | select(.name == "SHA256SUMS") | .browser_download_url' <<<"$release_json")
-[[ -n $asset_name && -n $asset_url ]] || { fail_step; die "no se encontró el binario linux-static-x64 en la release $latest_ver"; }
+[[ -n $asset_name && -n $asset_url ]] || { fail_step; die "linux-static-x64 binary not found in release $latest_ver"; }
 
 current_ver=""
 if [[ -x $INSTALL_DIR/xmrig ]]; then
   current_ver=$("$INSTALL_DIR/xmrig" --version 2>/dev/null | awk 'NR==1 {print $2}' || true)
 fi
 if [[ $current_ver == "$latest_ver" ]]; then
-  ok "v$latest_ver, ya instalada"
+  ok "v$latest_ver, already installed"
   NEED_DOWNLOAD=0
 else
-  ok "v$latest_ver${current_ver:+, instalada: v$current_ver}"
+  ok "v$latest_ver${current_ver:+, installed: v$current_ver}"
   NEED_DOWNLOAD=1
 fi
 
 if (( NEED_DOWNLOAD )); then
-  step "Descargando XMRig v$latest_ver"
+  step "Downloading XMRig v$latest_ver"
   run curl -fsSL -o "$TMP/$asset_name" "$asset_url"
   ok
 
-  step "Verificando la firma SHA256"
+  step "Verifying SHA256 checksum"
   if [[ -n $sums_url ]]; then
     curl -fsSL -o "$TMP/SHA256SUMS" "$sums_url"
     expected=$(grep -F "$asset_name" "$TMP/SHA256SUMS" | awk '{print tolower($1)}' | head -n1 || true)
     actual=$(sha256sum "$TMP/$asset_name" | awk '{print $1}')
     if [[ -z $expected ]]; then
-      ok_warn "la release no publica el hash de este archivo"
+      ok_warn "the release does not publish a hash for this file"
     elif [[ $expected != "$actual" ]]; then
-      fail_step "no coincide"
-      die "el SHA256 del archivo descargado no coincide con el publicado. Se canceló la instalación."
+      fail_step "mismatch"
+      die "the SHA256 of the downloaded file does not match the published one. Installation aborted."
     else
       ok
     fi
   else
-    ok_warn "la release no publica SHA256SUMS"
+    ok_warn "the release does not publish SHA256SUMS"
   fi
 
-  step "Extrayendo XMRig"
+  step "Extracting XMRig"
   tar -xzf "$TMP/$asset_name" -C "$TMP"
   new_bin=$(find "$TMP" -type f -name xmrig -perm -u+x | head -n1)
-  [[ -n $new_bin ]] || { fail_step; die "no se encontró el ejecutable xmrig dentro del archivo"; }
+  [[ -n $new_bin ]] || { fail_step; die "xmrig executable not found inside the archive"; }
   ok
 fi
 
 # =============================================================================
-#  3. config.json desde la plantilla del repo
+#  3. config.json from the repo template
 # =============================================================================
-step "Descargando la configuración del repo"
-# El parámetro evita que el CDN de GitHub devuelva una versión cacheada.
+step "Downloading the configuration from the repo"
+# The query parameter keeps GitHub's CDN from serving a cached copy.
 curl -fsSL -o "$TMP/template.json" "${CONFIG_TEMPLATE_URL}?t=$(date +%s)"
 jq --arg w "$WORKER" '(.pools[].user) |= gsub("\\{\\{WORKER\\}\\}"; $w)' \
   "$TMP/template.json" >"$TMP/config.json" 2>>"$LOG" \
-  || { fail_step; die "la plantilla config/xmrig.json del repo no es un JSON válido"; }
+  || { fail_step; die "the repo template config/xmrig.json is not valid JSON"; }
 if jq -e '[.pools[].user] | any(test("\\{\\{|^\\s*$"))' "$TMP/config.json" >/dev/null; then
-  fail_step; die "la plantilla tiene un usuario de pool vacío o con variables sin reemplazar"
+  fail_step; die "the template has an empty pool user or unreplaced variables"
 fi
 pool_url=$(jq -r '.pools[0].url' "$TMP/config.json")
 if [[ -f $INSTALL_DIR/config.json ]] && cmp -s "$TMP/config.json" "$INSTALL_DIR/config.json"; then
-  ok "sin cambios"
+  ok "unchanged"
 else
   ok "pool $pool_url, worker $WORKER"
 fi
 
 # =============================================================================
-#  4. Instalación en /opt/xmrig (con backup de la versión anterior)
+#  4. Install into /opt/xmrig (backing up the previous version)
 # =============================================================================
-step "Instalando en $INSTALL_DIR"
+step "Installing into $INSTALL_DIR"
 if systemctl is-active --quiet "$SERVICE_NAME"; then
   systemctl stop "$SERVICE_NAME" >>"$LOG" 2>&1
 fi
@@ -318,43 +319,43 @@ mkdir -p "$BACKUP_DIR"
 INSTALLED_NEW=1
 (( NEED_DOWNLOAD )) && install -m 755 "$new_bin" "$INSTALL_DIR/xmrig"
 install -m 644 "$TMP/config.json" "$INSTALL_DIR/config.json"
-if [[ -n $(ls -A "$BACKUP_DIR") ]]; then ok "backup en $BACKUP_DIR"; else ok; fi
+if [[ -n $(ls -A "$BACKUP_DIR") ]]; then ok "backup in $BACKUP_DIR"; else ok; fi
 
 # =============================================================================
-#  5. Huge pages y MSR
+#  5. Huge pages and MSR
 # =============================================================================
-step "Configurando huge pages y MSR"
+step "Configuring huge pages and MSR"
 hp_note=""
 
-# Páginas de 2MB: se aplican en caliente vía sysctl.
-if write_if_changed "$SYSCTL_FILE" "# Generado por XMR Mining: huge pages de 2MB para RandomX
+# 2MB pages: applied live through sysctl.
+if write_if_changed "$SYSCTL_FILE" "# Generated by XMR Mining: 2MB huge pages for RandomX
 vm.nr_hugepages = $pages_2m"; then
   info "vm.nr_hugepages = $pages_2m"
 fi
 sysctl -q -p "$SYSCTL_FILE" >>"$LOG" 2>&1 || true
 got_2m=$(cat /proc/sys/vm/nr_hugepages)
 if (( got_2m < pages_2m )); then
-  REBOOT_REASONS+=("huge pages de 2MB: solo se reservaron $got_2m de $pages_2m (memoria fragmentada)")
+  REBOOT_REASONS+=("2MB huge pages: only $got_2m of $pages_2m reserved (fragmented memory)")
 fi
 
-# Páginas de 1GB: solo se reservan de forma confiable al arrancar (parámetro de kernel).
+# 1GB pages: only reliably reserved at boot (kernel parameter).
 if (( gb_pages > 0 )); then
   if grep -q 'hugepagesz=1G' /etc/default/grub 2>/dev/null; then
-    info "huge pages de 1GB ya configuradas en /etc/default/grub"
+    info "1GB huge pages already configured in /etc/default/grub"
   elif ! command -v update-grub >/dev/null; then
-    hp_note="sin GRUB, no se configuraron páginas de 1GB"
-  elif write_if_changed "$GRUB_FILE" "# Generado por XMR Mining: huge pages de 1GB para RandomX
+    hp_note="no GRUB, 1GB pages not configured"
+  elif write_if_changed "$GRUB_FILE" "# Generated by XMR Mining: 1GB huge pages for RandomX
 GRUB_CMDLINE_LINUX_DEFAULT=\"\$GRUB_CMDLINE_LINUX_DEFAULT hugepagesz=1G hugepages=$gb_pages\""; then
     run update-grub
-    info "huge pages de 1GB: $gb_pages (parámetro de kernel)"
-    REBOOT_REASONS+=("huge pages de 1GB recién configuradas en el kernel")
+    info "1GB huge pages: $gb_pages (kernel parameter)"
+    REBOOT_REASONS+=("1GB huge pages just configured in the kernel")
   fi
 elif [[ -f $GRUB_FILE ]]; then
   rm -f "$GRUB_FILE"
   run update-grub
 fi
 
-# Módulo MSR: XMRig lo usa para optimizar la CPU (requiere root).
+# MSR module: XMRig uses it to tune the CPU (requires root).
 write_if_changed "$MODULES_FILE" "msr" || true
 modprobe msr >>"$LOG" 2>&1 || true
 
@@ -363,13 +364,13 @@ if [[ -n $hp_note ]]; then
 elif (( gb_pages > 0 )); then
   ok "$pages_2m × 2MB + $gb_pages × 1GB"
 else
-  ok "$pages_2m × 2MB, la CPU no soporta páginas de 1GB"
+  ok "$pages_2m × 2MB, CPU does not support 1GB pages"
 fi
 
 # =============================================================================
-#  6. Servicio systemd
+#  6. systemd service
 # =============================================================================
-step "Configurando el servicio $SERVICE_NAME"
+step "Configuring the $SERVICE_NAME service"
 unit="[Unit]
 Description=XMRig Monero miner
 After=network-online.target
@@ -387,12 +388,12 @@ WantedBy=multi-user.target"
 write_if_changed "$SERVICE_FILE" "$unit" || true
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" >>"$LOG" 2>&1
-ok "habilitado al inicio"
+ok "enabled at boot"
 
 # =============================================================================
-#  7. Prueba: arrancar y seguir el log en vivo
+#  7. Test: start the service and follow its log live
 # =============================================================================
-step "Probando el servicio"
+step "Testing the service"
 systemctl stop "$SERVICE_NAME" >>"$LOG" 2>&1 || true
 sleep 1
 since=$(date '+%Y-%m-%d %H:%M:%S')
@@ -421,9 +422,9 @@ while true; do
       if [[ $line =~ $re_warn ]]; then warn "$line"; else info "$line"; fi
     fi
   else
-    (( $? > 128 )) || break        # EOF: se cumplió el tiempo máximo
+    (( $? > 128 )) || break        # EOF: the timeout was reached
   fi
-  progress "esperando conexión al pool ($((SECONDS - t0))s)"
+  progress "waiting for pool connection ($((SECONDS - t0))s)"
 done
 shopt -u nocasematch
 kill "$JPID" 2>/dev/null || true
@@ -431,18 +432,18 @@ exec {JFD}<&-
 
 case $result in
   ok)
-    ok "conectado al pool en $((SECONDS - t0))s"
+    ok "connected to the pool in $((SECONDS - t0))s"
     ;;
   *)
     if [[ $result == timeout ]]; then
-      fail_step "sin conexión al pool en ${TEST_TIMEOUT}s"
+      fail_step "no pool connection within ${TEST_TIMEOUT}s"
     else
-      fail_step "error detectado"
+      fail_step "error detected"
     fi
     echo
-    echo "  ${C_ERR}Errores encontrados:${C_0}"
+    echo "  ${C_ERR}Errors found:${C_0}"
     for l in "${error_lines[@]}"; do echo "    $l"; done
-    echo "  Últimas líneas del servicio:"
+    echo "  Last lines from the service:"
     journalctl -u "$SERVICE_NAME" --since "$since" -n 15 -o cat --no-pager 2>/dev/null \
       | sed 's/\x1b\[[0-9;]*m//g; s/^/    /'
     trap - ERR
@@ -452,54 +453,54 @@ case $result in
 esac
 
 # =============================================================================
-#  8. Limpieza de instalaciones anteriores (formato viejo en /home/*/xmrig)
-#     Se borra la carpeta completa, con todo su contenido.
+#  8. Remove previous installs (old layout in /home/*/xmrig)
+#     The whole folder is deleted, with all its contents.
 # =============================================================================
 old_dirs=()
 for d in /home/*/xmrig /root/xmrig; do
   [[ -f $d/start-xmrig.sh ]] && old_dirs+=("$d")
 done
 if (( ${#old_dirs[@]} )); then
-  step "Eliminando la instalación anterior"
+  step "Removing the previous install"
   for d in "${old_dirs[@]}"; do
     rm -rf "$d"
-    info "eliminado $d"
+    info "removed $d"
   done
   ok
 fi
 
 # =============================================================================
-#  9. Resumen y reinicio (solo si hace falta)
+#  9. Summary and reboot (only when needed)
 # =============================================================================
 if [[ -f /var/run/reboot-required ]]; then
   pkgs=""
   [[ -f /var/run/reboot-required.pkgs ]] && pkgs=$(sort -u /var/run/reboot-required.pkgs | paste -sd ',' | sed 's/,/, /g')
-  REBOOT_REASONS+=("actualizaciones del sistema${pkgs:+: $pkgs}")
+  REBOOT_REASONS+=("system updates${pkgs:+: $pkgs}")
 fi
 
 echo
-echo "${C_OK}${C_B}Listo.${C_0} XMRig v$latest_ver está minando como servicio."
+echo "${C_OK}${C_B}Done.${C_0} XMRig v$latest_ver is mining as a service."
 echo "${C_DIM}  Worker: $WORKER · Pool: $pool_url"
-echo "  Ver el log en vivo:  journalctl -fu $SERVICE_NAME"
-echo "  Estado del servicio: systemctl status $SERVICE_NAME${C_0}"
+echo "  Live log:       journalctl -fu $SERVICE_NAME"
+echo "  Service status: systemctl status $SERVICE_NAME${C_0}"
 echo
 
 if (( ${#REBOOT_REASONS[@]} )); then
-  echo "${C_WARN}Se recomienda reiniciar:${C_0}"
+  echo "${C_WARN}A reboot is recommended:${C_0}"
   for r in "${REBOOT_REASONS[@]}"; do echo "  - $r"; done
   if { exec 3</dev/tty; } 2>/dev/null; then
-    printf '\n¿Reiniciar ahora? [s/N] '
+    printf '\nReboot now? [y/N] '
     read -r answer <&3 || answer=""
     exec 3<&-
-    if [[ $answer =~ ^[sSyY] ]]; then
-      echo "Reiniciando..."
+    if [[ $answer =~ ^[yYsS] ]]; then
+      echo "Rebooting..."
       reboot
     else
-      echo "No se reinicia. Acordate de reiniciar más tarde: sudo reboot"
+      echo "Not rebooting. Remember to reboot later: sudo reboot"
     fi
   else
-    echo "Reiniciá cuando puedas: sudo reboot"
+    echo "Reboot when possible: sudo reboot"
   fi
 else
-  echo "${C_DIM}No hace falta reiniciar.${C_0}"
+  echo "${C_DIM}No reboot needed.${C_0}"
 fi
