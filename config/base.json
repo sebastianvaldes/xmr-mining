@@ -1,0 +1,13 @@
+{
+  "autosave": false,
+  "colors": true,
+  "donate-level": 1,
+  "donate-over-proxy": 1,
+  "cpu": {
+    "enabled": true,
+    "huge-pages": true
+  },
+  "randomx": {
+    "1gb-pages": true
+  }
+}

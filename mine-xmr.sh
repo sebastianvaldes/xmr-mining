@@ -4,12 +4,16 @@
 #
 #  Usage (on the machine to install/update):
 #    curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash
+#  Choosing the pool profile without the menu:
+#    curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash -s -- <profile>
 #
 #  What it does:
-#    0. Checks CPU and RAM before changing anything
+#    0. Checks CPU and RAM before changing anything, then selects the pool
+#       profile (config/pools/<profile>.json in the repo)
 #    1. Updates the operating system (apt)
 #    2. Downloads the latest XMRig release from GitHub (verifies SHA256)
-#    3. Builds /opt/xmrig/config.json from the repo template (worker = hostname)
+#    3. Builds /opt/xmrig/config.json from config/base.json + the pool profile
+#       (worker = hostname)
 #    4. Configures huge pages (2MB and 1GB) and the MSR module
 #    5. Creates/updates and enables xmrig.service
 #    6. Tests the service by following its log live
@@ -21,10 +25,11 @@ set -Eeuo pipefail
 
 # ---------- Settings ----------------------------------------------------------
 REPO_RAW="${XMR_REPO_RAW:-https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main}"
-CONFIG_TEMPLATE_URL="$REPO_RAW/config/xmrig.json"
+PROFILE_ARG="${1:-}"      # optional pool profile passed as: bash -s -- <profile>
 
 INSTALL_DIR="/opt/xmrig"
 BACKUP_DIR="$INSTALL_DIR/backup"
+PROFILE_FILE="$INSTALL_DIR/profile"   # pool profile currently installed
 SERVICE_NAME="xmrig"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 SYSCTL_FILE="/etc/sysctl.d/99-xmrig-hugepages.conf"
@@ -123,9 +128,10 @@ rollback() {
   systemctl stop "$SERVICE_NAME" >>"$LOG" 2>&1 || true
   systemctl disable "$SERVICE_NAME" >>"$LOG" 2>&1 || true
   if [[ -f $BACKUP_DIR/xmrig || -f $BACKUP_DIR/config.json ]]; then
-    echo "  Restoring the previous XMRig version and config.json..."
+    echo "  Restoring the previous XMRig version, config.json and pool profile..."
     [[ -f $BACKUP_DIR/xmrig ]]       && cp -a "$BACKUP_DIR/xmrig" "$INSTALL_DIR/xmrig"
     [[ -f $BACKUP_DIR/config.json ]] && cp -a "$BACKUP_DIR/config.json" "$INSTALL_DIR/config.json"
+    [[ -f $BACKUP_DIR/profile ]]     && cp -a "$BACKUP_DIR/profile" "$PROFILE_FILE"
   fi
   echo
   echo "  The service is now ${C_B}disabled${C_0}. Once the problem is fixed, run the"
@@ -156,6 +162,13 @@ trap cleanup EXIT
 [[ ${ID:-} == ubuntu ]] || die "this script only supports Ubuntu (detected: ${PRETTY_NAME:-unknown})"
 [[ $(uname -m) == x86_64 ]] || die "this script only supports x86_64 (detected: $(uname -m))"
 command -v systemctl >/dev/null || die "systemd is not available"
+[[ -z $PROFILE_ARG || $PROFILE_ARG =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid profile name: $PROFILE_ARG"
+# GitHub API URL that lists config/pools, derived from REPO_RAW (.../<owner>/<repo>/<branch>).
+if [[ $REPO_RAW =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/(.+)$ ]]; then
+  PROFILES_API="https://api.github.com/repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/contents/config/pools?ref=${BASH_REMATCH[3]}"
+else
+  die "XMR_REPO_RAW must look like https://raw.githubusercontent.com/<owner>/<repo>/<branch>"
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 TMP=$(mktemp -d)
@@ -213,6 +226,77 @@ if (( gb_pages > 0 )); then
 else
   ok_warn "$threads threads, $mem_mb MB RAM, CPU does not expose 1GB pages"
   warn "On a VM, setting the CPU type to 'host' enables 1GB pages (higher hashrate)."
+fi
+
+# =============================================================================
+#  0b. Pool profile: asked up front so the rest runs unattended
+#      Priority: argument > menu (if there is a terminal) > current profile
+# =============================================================================
+step "Looking up pool profiles in the repo"
+profiles_json=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$PROFILES_API") \
+  || { fail_step; die "could not list config/pools in the repo ($PROFILES_API)"; }
+mapfile -t available < <(grep -oE '"name": *"[A-Za-z0-9._-]+\.json"' <<<"$profiles_json" \
+  | sed -E 's/.*"([^"]+)\.json"$/\1/' | sort)
+(( ${#available[@]} )) || { fail_step; die "no profiles found in config/pools"; }
+ok "${#available[@]} available"
+
+in_list() { local p; for p in "${available[@]}"; do [[ $p == "$1" ]] && return 0; done; return 1; }
+
+current_profile=""
+[[ -f $PROFILE_FILE ]] && current_profile=$(tr -d '[:space:]' <"$PROFILE_FILE")
+current_valid=0
+[[ -n $current_profile ]] && in_list "$current_profile" && current_valid=1
+printf 'profiles=%s current=%s valid=%s arg=%s\n' "${available[*]}" "$current_profile" "$current_valid" "$PROFILE_ARG" >>"$LOG"
+
+PROFILE=""
+if [[ -n $PROFILE_ARG ]]; then
+  in_list "$PROFILE_ARG" || die "profile '$PROFILE_ARG' not found. Available: ${available[*]}"
+  PROFILE=$PROFILE_ARG
+elif { exec 3</dev/tty; } 2>/dev/null; then
+  # Menu: option 1 is the current profile (if it still exists), the rest in alphabetical order.
+  menu=()
+  (( current_valid )) && menu+=("$current_profile")
+  for p in "${available[@]}"; do
+    (( current_valid )) && [[ $p == "$current_profile" ]] && continue
+    menu+=("$p")
+  done
+  echo
+  if [[ -n $current_profile ]] && (( ! current_valid )); then
+    echo "  ${C_WARN}⚠ Current profile \"$current_profile\" no longer exists in the repo.${C_0}"
+  fi
+  echo "  Available pool profiles:"
+  for i in "${!menu[@]}"; do
+    label=""
+    (( i == 0 && current_valid )) && label="   ${C_DIM}(current)${C_0}"
+    printf '    %d) %s%s\n' "$((i + 1))" "${menu[$i]}" "$label"
+  done
+  while [[ -z $PROFILE ]]; do
+    if (( current_valid )); then printf '  Select profile [1]: '; else printf '  Select profile: '; fi
+    read -r choice <&3 || die "no answer received"
+    [[ -z $choice ]] && (( current_valid )) && choice=1
+    if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#menu[@]} )); then
+      PROFILE=${menu[choice - 1]}
+    elif [[ -n $choice ]] && in_list "$choice"; then
+      PROFILE=$choice
+    else
+      echo "  ${C_WARN}Invalid option, choose a number from 1 to ${#menu[@]}.${C_0}"
+    fi
+  done
+  exec 3<&-
+  echo
+elif (( current_valid )); then
+  PROFILE=$current_profile
+else
+  die "no terminal to ask for a pool profile and no valid current profile.
+  Pass it as an argument: curl -fsSL <url> | sudo bash -s -- <profile>
+  Available: ${available[*]}"
+fi
+
+step "Pool profile"
+if [[ -n $current_profile && $PROFILE != "$current_profile" ]]; then
+  ok "$PROFILE, changing from $current_profile"
+else
+  ok "$PROFILE"
 fi
 
 # =============================================================================
@@ -286,16 +370,20 @@ if (( NEED_DOWNLOAD )); then
 fi
 
 # =============================================================================
-#  3. config.json from the repo template
+#  3. config.json = config/base.json + config/pools/<profile>.json
 # =============================================================================
 step "Downloading the configuration from the repo"
 # The query parameter keeps GitHub's CDN from serving a cached copy.
-curl -fsSL -o "$TMP/template.json" "${CONFIG_TEMPLATE_URL}?t=$(date +%s)"
-jq --arg w "$WORKER" '(.pools[].user) |= gsub("\\{\\{WORKER\\}\\}"; $w)' \
-  "$TMP/template.json" >"$TMP/config.json" 2>>"$LOG" \
-  || { fail_step; die "the repo template config/xmrig.json is not valid JSON"; }
+ts=$(date +%s)
+curl -fsSL -o "$TMP/base.json" "$REPO_RAW/config/base.json?t=$ts"
+curl -fsSL -o "$TMP/profile.json" "$REPO_RAW/config/pools/$PROFILE.json?t=$ts"
+jq -e '.pools | type == "array" and length > 0' "$TMP/profile.json" >/dev/null 2>>"$LOG" \
+  || { fail_step; die "config/pools/$PROFILE.json is not valid JSON or has no \"pools\" list"; }
+jq -s --arg w "$WORKER" '(.[0] * .[1]) | (.pools[].user) |= gsub("\\{\\{WORKER\\}\\}"; $w)' \
+  "$TMP/base.json" "$TMP/profile.json" >"$TMP/config.json" 2>>"$LOG" \
+  || { fail_step; die "config/base.json is not valid JSON"; }
 if jq -e '[.pools[].user] | any(test("\\{\\{|^\\s*$"))' "$TMP/config.json" >/dev/null; then
-  fail_step; die "the template has an empty pool user or unreplaced variables"
+  fail_step; die "config/pools/$PROFILE.json has an empty pool user or unreplaced variables"
 fi
 pool_url=$(jq -r '.pools[0].url' "$TMP/config.json")
 if [[ -f $INSTALL_DIR/config.json ]] && cmp -s "$TMP/config.json" "$INSTALL_DIR/config.json"; then
@@ -316,9 +404,11 @@ rm -rf "$BACKUP_DIR"
 mkdir -p "$BACKUP_DIR"
 [[ -f $INSTALL_DIR/xmrig ]]       && cp -a "$INSTALL_DIR/xmrig" "$BACKUP_DIR/"
 [[ -f $INSTALL_DIR/config.json ]] && cp -a "$INSTALL_DIR/config.json" "$BACKUP_DIR/"
+[[ -f $PROFILE_FILE ]]            && cp -a "$PROFILE_FILE" "$BACKUP_DIR/"
 INSTALLED_NEW=1
 (( NEED_DOWNLOAD )) && install -m 755 "$new_bin" "$INSTALL_DIR/xmrig"
 install -m 644 "$TMP/config.json" "$INSTALL_DIR/config.json"
+printf '%s\n' "$PROFILE" >"$PROFILE_FILE"
 if [[ -n $(ls -A "$BACKUP_DIR") ]]; then ok "backup in $BACKUP_DIR"; else ok; fi
 
 # =============================================================================
@@ -480,7 +570,7 @@ fi
 
 echo
 echo "${C_OK}${C_B}Done.${C_0} XMRig v$latest_ver is mining as a service."
-echo "${C_DIM}  Worker: $WORKER · Pool: $pool_url"
+echo "${C_DIM}  Profile: $PROFILE · Worker: $WORKER · Pool: $pool_url"
 echo "  Live log:       journalctl -fu $SERVICE_NAME"
 echo "  Service status: systemctl status $SERVICE_NAME${C_0}"
 echo
