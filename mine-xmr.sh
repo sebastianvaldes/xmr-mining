@@ -227,7 +227,13 @@ if (( gb_pages > 0 )); then
   ok "$threads threads, $mem_mb MB RAM, 1GB pages supported"
 else
   ok_warn "$threads threads, $mem_mb MB RAM, CPU does not expose 1GB pages"
-  warn "On a VM, setting the CPU type to 'host' enables 1GB pages (higher hashrate)."
+  # The hint depends on the hypervisor; 2MB pages work fine either way (1GB adds ~1-3%)
+  case "$(systemd-detect-virt 2>/dev/null || true)" in
+    kvm|qemu) warn "Setting the VM CPU type to 'host' enables 1GB pages (slightly higher hashrate)." ;;
+    vmware)   warn "VMware exposes 1GB pages only on ESXi 6.7+ with VM hardware version 14+. Mining works fine with 2MB pages." ;;
+    none)     warn "This CPU does not support 1GB pages. Mining works fine with 2MB pages." ;;
+    *)        warn "The hypervisor does not expose 1GB pages to this VM. Mining works fine with 2MB pages." ;;
+  esac
 fi
 
 # =============================================================================
