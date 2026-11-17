@@ -230,7 +230,7 @@ else
   # The hint depends on the hypervisor; 2MB pages work fine either way (1GB adds ~1-3%)
   case "$(systemd-detect-virt 2>/dev/null || true)" in
     kvm|qemu) warn "Setting the VM CPU type to 'host' enables 1GB pages (slightly higher hashrate)." ;;
-    vmware)   warn "VMware exposes 1GB pages only on ESXi 6.7+ with VM hardware version 14+. Mining works fine with 2MB pages." ;;
+    vmware)   warn "VMware hides 1GB pages if the cluster EVC mode is older than Sandy Bridge. Mining works fine with 2MB pages." ;;
     none)     warn "This CPU does not support 1GB pages. Mining works fine with 2MB pages." ;;
     *)        warn "The hypervisor does not expose 1GB pages to this VM. Mining works fine with 2MB pages." ;;
   esac
