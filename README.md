@@ -54,7 +54,7 @@ The final `config.json` is `base.json` merged with the selected profile. Changes
 ### Profile selection
 
 1. If a profile is passed as an argument, that one is used.
-2. Otherwise a menu lists the profiles in the repo. Option 1 is the machine's current profile (Enter keeps it); the rest follow in alphabetical order. On a first install, or if the current profile was removed from the repo, there is no default and a choice is required.
+2. Otherwise a menu lists the profiles in the repo. Option 0 is always `auto` (when `config/auto` is valid), then the machine's current profile, then the rest in alphabetical order. Enter keeps the current profile, whichever number it has. On a first install, or if the current profile was removed from the repo, there is no default and a choice is required.
 3. Without a terminal to ask, the current profile is kept; if there is none, the script stops and asks for the argument.
 
 The installed profile is stored in `/opt/xmrig/profile`.

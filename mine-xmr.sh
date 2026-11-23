@@ -303,40 +303,48 @@ if [[ -n $PROFILE_ARG ]]; then
   valid_choice "$PROFILE_ARG" || die "profile '$PROFILE_ARG' not found. Available: ${available[*]}$auto_hint"
   PROFILE=$PROFILE_ARG
 elif { exec 3</dev/tty; } 2>/dev/null; then
-  # Menu: option 1 is the current profile (if it still exists), the rest in alphabetical order.
+  # Menu: "0) auto" always first (when config/auto is valid), then the current
+  # profile (if it still exists), then the rest in alphabetical order.
+  # Enter keeps the current choice, whichever number it has.
   menu=()
-  (( current_valid )) && menu+=("$current_profile")
+  (( auto_ok )) && menu+=("auto")
+  (( current_valid )) && [[ $current_profile != auto ]] && menu+=("$current_profile")
   for p in "${available[@]}"; do
     (( current_valid )) && [[ $p == "$current_profile" ]] && continue
     menu+=("$p")
   done
-  (( auto_ok )) && [[ $current_profile != auto ]] && menu+=("auto")
+  first=$(( auto_ok ? 0 : 1 ))          # number shown for menu[0]
+  last=$(( first + ${#menu[@]} - 1 ))
+  default=""
+  for i in "${!menu[@]}"; do
+    (( current_valid )) && [[ ${menu[$i]} == "$current_profile" ]] && default=$(( i + first ))
+  done
   echo
   if [[ -n $current_profile ]] && (( ! current_valid )); then
     echo "  ${C_WARN}⚠ Current profile \"$current_profile\" no longer exists in the repo.${C_0}"
   fi
   echo "  Available pool profiles:"
   for i in "${!menu[@]}"; do
+    notes=()
+    [[ $(( i + first )) == "$default" ]] && notes+=("current")
+    [[ ${menu[$i]} == auto ]] && notes+=("$auto_label")
     label=""
-    if (( i == 0 && current_valid )) && [[ ${menu[$i]} == auto ]]; then
-      label="   ${C_DIM}(current, $auto_label)${C_0}"
-    elif (( i == 0 && current_valid )); then
-      label="   ${C_DIM}(current)${C_0}"
-    elif [[ ${menu[$i]} == auto ]]; then
-      label="   ${C_DIM}($auto_label)${C_0}"
+    if (( ${#notes[@]} )); then
+      label=$(printf '%s, ' "${notes[@]}")
+      label="   ${C_DIM}(${label%, })${C_0}"
     fi
-    printf '    %d) %s%s\n' "$((i + 1))" "${menu[$i]}" "$label"
+    printf '    %d) %s%s\n' "$(( i + first ))" "${menu[$i]}" "$label"
   done
   while [[ -z $PROFILE ]]; do
-    if (( current_valid )); then printf '  Select profile [1]: '; else printf '  Select profile: '; fi
+    if [[ -n $default ]]; then printf '  Select profile [%s]: ' "$default"; else printf '  Select profile: '; fi
     read -r choice <&3 || die "no answer received"
-    [[ -z $choice ]] && (( current_valid )) && choice=1
-    if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#menu[@]} )); then
-      PROFILE=${menu[choice - 1]}
+    [[ -z $choice ]] && choice=$default
+    if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= first && choice <= last )); then
+      PROFILE=${menu[choice - first]}
     elif [[ -n $choice ]] && valid_choice "$choice"; then
       PROFILE=$choice
     else
-      echo "  ${C_WARN}Invalid option, choose a number from 1 to ${#menu[@]}.${C_0}"
+      echo "  ${C_WARN}Invalid option, choose a number from $first to $last.${C_0}"
     fi
   done
   exec 3<&-
