@@ -1,0 +1,11 @@
+{
+  "pools": [
+    {
+      "url": "xtm-rx-br.kryptex.network:8038",
+      "algo": "rx/0",
+      "user": "solo:12EyxxcHxNxFY3LbGva7Xz68WvfLuaj5w2xcAWcK3TM8RWV7RUDCTeofgbU9ozFMhuwignzHUDaTcpZHzjRS59RpgKd/{{WORKER}}",
+      "keepalive": true,
+      "tls": true
+    }
+  ]
+}
