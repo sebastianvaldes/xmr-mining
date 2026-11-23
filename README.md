@@ -61,7 +61,7 @@ The installed profile is stored in `/opt/xmrig/profile`.
 
 ## Automatic updates (`auto` profile)
 
-Choosing `auto` in the menu (or `bash -s -- auto`) makes the machine follow [`config/auto`](config/auto), a one-line file with a profile name or `stop`. A systemd timer runs `/opt/xmrig/xmr-auto-update.sh` every hour, which:
+Choosing `auto` in the menu (or `bash -s -- auto`) makes the machine follow [`config/auto`](config/auto), a one-line file with a profile name or `stop`. A systemd timer runs `/opt/xmrig/xmr-auto-update.sh` 5 minutes after boot and then every hour on the hour (xx:00), which:
 
 | `config/auto` | What it does |
 |---|---|

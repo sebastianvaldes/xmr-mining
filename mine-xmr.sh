@@ -726,16 +726,20 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=$UPDATER" && units_changed=1
   write_if_changed "$AUTO_TIMER_FILE" "[Unit]
-Description=Run the XMR Mining automatic update every hour
+Description=Run the XMR Mining automatic update 5 minutes after boot and every hour on the hour
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=1h
-RandomizedDelaySec=5min
+OnCalendar=hourly
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target" && units_changed=1
-  (( units_changed )) && systemctl daemon-reload
+  # A running timer only picks up a new schedule after a restart.
+  if (( units_changed )); then
+    systemctl daemon-reload
+    systemctl restart "${AUTO_NAME}.timer" >>"$LOG" 2>&1 || true
+  fi
   systemctl enable --now "${AUTO_NAME}.timer" >>"$LOG" 2>&1
   ok "every hour, following config/auto"
 elif [[ -f $AUTO_TIMER_FILE || -f $UPDATER ]]; then
