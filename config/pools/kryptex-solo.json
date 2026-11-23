@@ -1,0 +1,12 @@
+{
+  "pools": [
+    {
+      "url": "xmr-br.kryptex.network:7029",
+      "algo": "rx/0",
+      "coin": "monero",
+      "user": "solo:44Ts4YmfwCuBk7Uw3ZpvjGcdrxAV1NZudSfuy8PWyctzYCsfDqKgfJP4zr6QBgwHoTASnkqzJazf9hY5KkqZXWcf259zGxX/{{WORKER}}",
+      "keepalive": true,
+      "tls": false
+    }
+  ]
+}
