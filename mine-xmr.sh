@@ -6,6 +6,9 @@
 #    curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash
 #  Choosing the pool profile without the menu:
 #    curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/mine-xmr.sh | sudo bash -s -- <profile>
+#  The "auto" profile follows config/auto in the repo (a profile or "stop")
+#  and installs an hourly timer that keeps the machine in sync with it
+#  (see xmr-auto-update.sh).
 #
 #  What it does:
 #    0. Checks CPU and RAM before changing anything, then selects the pool
@@ -19,6 +22,7 @@
 #    6. Tests the service by following its log live
 #       - OK    -> keeps running; asks to reboot only when needed
 #       - Error -> disables the service, restores the previous version and reports
+#    7. Sets up (auto profile) or removes (any other profile) the automatic updates
 # =============================================================================
 
 set -Eeuo pipefail
@@ -40,6 +44,16 @@ LOG_KEEP=20               # number of installer logs to keep
 
 XMRIG_API="https://api.github.com/repos/xmrig/xmrig/releases/latest"
 TEST_TIMEOUT=60           # max seconds waiting for a pool connection or an error
+
+# Automatic updates ("auto" profile)
+UPDATER="$INSTALL_DIR/xmr-auto-update.sh"
+REPO_FILE="$INSTALL_DIR/repo"                   # repo the updater follows (main or a test branch)
+AUTO_CURRENT_FILE="$INSTALL_DIR/auto-current"   # profile applied in auto mode, or "stop"
+AUTO_FAILED_FILE="$INSTALL_DIR/auto-failed"
+AUTO_NAME="xmrig-auto-update"
+AUTO_SERVICE_FILE="/etc/systemd/system/${AUTO_NAME}.service"
+AUTO_TIMER_FILE="/etc/systemd/system/${AUTO_NAME}.timer"
+LOCK_FILE="/run/xmr-mining.lock"                # shared with the updater: one run at a time
 
 # ---------- State -------------------------------------------------------------
 STEP_MSG=""
@@ -128,6 +142,8 @@ rollback() {
   echo "  Disabling the service autostart..."
   systemctl stop "$SERVICE_NAME" >>"$LOG" 2>&1 || true
   systemctl disable "$SERVICE_NAME" >>"$LOG" 2>&1 || true
+  # The automatic updates must not start it again behind our back.
+  systemctl disable --now "${AUTO_NAME}.timer" >>"$LOG" 2>&1 || true
   # Only restore a backup taken in this run (an older one may not match).
   if (( INSTALLED_NEW )) && [[ -f $BACKUP_DIR/xmrig || -f $BACKUP_DIR/config.json ]]; then
     echo "  Restoring the previous XMRig version, config.json and pool profile..."
@@ -171,6 +187,10 @@ if [[ $REPO_RAW =~ ^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/(.+)$ ]]
 else
   die "XMR_REPO_RAW must look like https://raw.githubusercontent.com/<owner>/<repo>/<branch>"
 fi
+
+# Only one run at a time (this script or the hourly automatic update).
+exec 9>"$LOCK_FILE"
+flock -w 600 9 || die "another XMR Mining run is still in progress"
 
 export DEBIAN_FRONTEND=noninteractive
 TMP=$(mktemp -d)
@@ -246,27 +266,58 @@ profiles_json=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$PROFILES_A
 mapfile -t available < <(grep -oE '"name": *"[A-Za-z0-9._-]+\.json"' <<<"$profiles_json" \
   | sed -E 's/.*"([^"]+)\.json"$/\1/' | sort)
 (( ${#available[@]} )) || { fail_step; die "no profiles found in config/pools"; }
-ok "${#available[@]} available"
 
 in_list() { local p; for p in "${available[@]}"; do [[ $p == "$1" ]] && return 0; done; return 1; }
+
+# config/auto: the profile that machines in "auto" mode follow, or "stop".
+auto_target=$( { curl -fsSL "$REPO_RAW/config/auto?t=$(date +%s)" 2>/dev/null || true; } | tr -d '[:space:]')
+auto_ok=0
+if [[ $auto_target == stop ]] || { [[ -n $auto_target ]] && in_list "$auto_target"; }; then
+  auto_ok=1
+  ok "${#available[@]} available, auto: $auto_target"
+elif [[ -n $auto_target ]]; then
+  ok_warn "${#available[@]} available, config/auto points to a missing profile: $auto_target"
+else
+  ok "${#available[@]} available"
+fi
+# A valid choice: a profile in the repo, or "auto" when config/auto is valid.
+valid_choice() { in_list "$1" || { [[ $1 == auto ]] && (( auto_ok )); }; }
+auto_label="follows config/auto, now: $auto_target"
+auto_hint=""
+(( auto_ok )) && auto_hint=" auto"
 
 current_profile=""
 [[ -f $PROFILE_FILE ]] && current_profile=$(tr -d '[:space:]' <"$PROFILE_FILE")
 current_valid=0
-[[ -n $current_profile ]] && in_list "$current_profile" && current_valid=1
-printf 'profiles=%s current=%s valid=%s arg=%s\n' "${available[*]}" "$current_profile" "$current_valid" "$PROFILE_ARG" >>"$LOG"
+[[ -n $current_profile ]] && valid_choice "$current_profile" && current_valid=1
+# In auto mode, the profile actually applied is stored separately.
+current_effective=$current_profile
+if [[ $current_profile == auto ]]; then
+  current_effective=$(tr -d '[:space:]' <"$AUTO_CURRENT_FILE" 2>/dev/null || true)
+fi
+printf 'profiles=%s auto=%s current=%s (%s) valid=%s arg=%s\n' "${available[*]}" "$auto_target" \
+  "$current_profile" "$current_effective" "$current_valid" "$PROFILE_ARG" >>"$LOG"
 
 PROFILE=""
 if [[ -n $PROFILE_ARG ]]; then
-  in_list "$PROFILE_ARG" || die "profile '$PROFILE_ARG' not found. Available: ${available[*]}"
+  valid_choice "$PROFILE_ARG" || die "profile '$PROFILE_ARG' not found. Available: ${available[*]}$auto_hint"
   PROFILE=$PROFILE_ARG
 elif { exec 3</dev/tty; } 2>/dev/null; then
-  # Menu: option 1 is the current profile (if it still exists), the rest in alphabetical order.
+  # Menu: "0) auto" always first (when config/auto is valid), then the current
+  # profile (if it still exists), then the rest in alphabetical order.
+  # Enter keeps the current choice, whichever number it has.
   menu=()
-  (( current_valid )) && menu+=("$current_profile")
+  (( auto_ok )) && menu+=("auto")
+  (( current_valid )) && [[ $current_profile != auto ]] && menu+=("$current_profile")
   for p in "${available[@]}"; do
     (( current_valid )) && [[ $p == "$current_profile" ]] && continue
     menu+=("$p")
+  done
+  first=$(( auto_ok ? 0 : 1 ))          # number shown for menu[0]
+  last=$(( first + ${#menu[@]} - 1 ))
+  default=""
+  for i in "${!menu[@]}"; do
+    (( current_valid )) && [[ ${menu[$i]} == "$current_profile" ]] && default=$(( i + first ))
   done
   echo
   if [[ -n $current_profile ]] && (( ! current_valid )); then
@@ -274,20 +325,26 @@ elif { exec 3</dev/tty; } 2>/dev/null; then
   fi
   echo "  Available pool profiles:"
   for i in "${!menu[@]}"; do
+    notes=()
+    [[ $(( i + first )) == "$default" ]] && notes+=("current")
+    [[ ${menu[$i]} == auto ]] && notes+=("$auto_label")
     label=""
-    (( i == 0 && current_valid )) && label="   ${C_DIM}(current)${C_0}"
-    printf '    %d) %s%s\n' "$((i + 1))" "${menu[$i]}" "$label"
+    if (( ${#notes[@]} )); then
+      label=$(printf '%s, ' "${notes[@]}")
+      label="   ${C_DIM}(${label%, })${C_0}"
+    fi
+    printf '    %d) %s%s\n' "$(( i + first ))" "${menu[$i]}" "$label"
   done
   while [[ -z $PROFILE ]]; do
-    if (( current_valid )); then printf '  Select profile [1]: '; else printf '  Select profile: '; fi
+    if [[ -n $default ]]; then printf '  Select profile [%s]: ' "$default"; else printf '  Select profile: '; fi
     read -r choice <&3 || die "no answer received"
-    [[ -z $choice ]] && (( current_valid )) && choice=1
-    if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#menu[@]} )); then
-      PROFILE=${menu[choice - 1]}
-    elif [[ -n $choice ]] && in_list "$choice"; then
+    [[ -z $choice ]] && choice=$default
+    if [[ $choice =~ ^[0-9]+$ ]] && (( choice >= first && choice <= last )); then
+      PROFILE=${menu[choice - first]}
+    elif [[ -n $choice ]] && valid_choice "$choice"; then
       PROFILE=$choice
     else
-      echo "  ${C_WARN}Invalid option, choose a number from 1 to ${#menu[@]}.${C_0}"
+      echo "  ${C_WARN}Invalid option, choose a number from $first to $last.${C_0}"
     fi
   done
   exec 3<&-
@@ -297,15 +354,30 @@ elif (( current_valid )); then
 else
   die "no terminal to ask for a pool profile and no valid current profile.
   Pass it as an argument: curl -fsSL <url> | sudo bash -s -- <profile>
-  Available: ${available[*]}"
+  Available: ${available[*]}$auto_hint"
+fi
+
+# SELECTED is what gets stored ("auto" or a profile); PROFILE is the pool
+# profile to apply now, or "stop" (auto mode only: mining stays stopped).
+SELECTED=$PROFILE
+AUTO=0; STOP=0
+if [[ $SELECTED == auto ]]; then
+  AUTO=1
+  PROFILE=$auto_target
+  [[ $PROFILE == stop ]] && STOP=1
 fi
 
 step "Pool profile"
-if [[ -n $current_profile && $PROFILE != "$current_profile" ]]; then
-  ok "$PROFILE, changing from $current_profile"
+new_label=$PROFILE
+(( AUTO )) && new_label="auto → $PROFILE"
+cur_label=$current_profile
+[[ $current_profile == auto ]] && cur_label="auto → ${current_effective:-?}"
+if [[ -n $current_profile && $new_label != "$cur_label" ]]; then
+  ok "$new_label, changing from $cur_label"
 else
-  ok "$PROFILE"
+  ok "$new_label"
 fi
+(( STOP )) && info "config/auto is 'stop': everything is updated, but mining stays stopped"
 
 # =============================================================================
 #  1. Operating system
@@ -380,6 +452,9 @@ fi
 # =============================================================================
 #  3. config.json = config/base.json + config/pools/<profile>.json
 # =============================================================================
+CONFIG_CHANGED=0
+pool_url="-"
+if (( ! STOP )); then
 step "Downloading the configuration from the repo"
 # The query parameter keeps GitHub's CDN from serving a cached copy.
 ts=$(date +%s)
@@ -401,6 +476,7 @@ if [[ -f $INSTALL_DIR/config.json ]] && cmp -s "$TMP/config.json" "$INSTALL_DIR/
 else
   ok "pool $pool_url, worker $WORKER"
 fi
+fi   # ! STOP
 
 # =============================================================================
 #  4. Install into /opt/xmrig (backing up the previous version)
@@ -409,7 +485,7 @@ fi
 step "Installing into $INSTALL_DIR"
 (( NEED_DOWNLOAD ))              && CHANGES+=("XMRig v$latest_ver")
 (( CONFIG_CHANGED ))             && CHANGES+=("config.json")
-[[ $PROFILE != "$current_profile" ]] && CHANGES+=("pool profile")
+(( ! STOP )) && [[ $PROFILE != "$current_effective" ]] && CHANGES+=("pool profile")
 if (( ${#CHANGES[@]} )); then
   if systemctl is-active --quiet "$SERVICE_NAME"; then
     systemctl stop "$SERVICE_NAME" >>"$LOG" 2>&1
@@ -422,12 +498,12 @@ if (( ${#CHANGES[@]} )); then
   [[ -f $PROFILE_FILE ]]            && cp -a "$PROFILE_FILE" "$BACKUP_DIR/"
   INSTALLED_NEW=1
   (( NEED_DOWNLOAD )) && install -m 755 "$new_bin" "$INSTALL_DIR/xmrig"
-  install -m 644 "$TMP/config.json" "$INSTALL_DIR/config.json"
-  printf '%s\n' "$PROFILE" >"$PROFILE_FILE"
+  (( CONFIG_CHANGED )) && install -m 644 "$TMP/config.json" "$INSTALL_DIR/config.json"
   if [[ -n $(ls -A "$BACKUP_DIR") ]]; then ok "backup in $BACKUP_DIR"; else ok; fi
 else
   ok "nothing to update"
 fi
+write_if_changed "$PROFILE_FILE" "$SELECTED" || true
 
 # =============================================================================
 #  5. Huge pages and MSR
@@ -498,14 +574,19 @@ if write_if_changed "$SERVICE_FILE" "$unit"; then
   CHANGES+=("service file")
   systemctl daemon-reload
 fi
-if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-  systemctl enable "$SERVICE_NAME" >>"$LOG" 2>&1
-  CHANGES+=("service was disabled")
+if (( STOP )); then
+  systemctl disable --now "$SERVICE_NAME" >>"$LOG" 2>&1 || true
+  ok "stopped and disabled (config/auto is 'stop')"
+else
+  if ! systemctl is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
+    systemctl enable "$SERVICE_NAME" >>"$LOG" 2>&1
+    CHANGES+=("service was disabled")
+  fi
+  if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    CHANGES+=("service was not running")
+  fi
+  ok "enabled at boot"
 fi
-if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-  CHANGES+=("service was not running")
-fi
-ok "enabled at boot"
 printf 'changes: %s\n' "${CHANGES[*]:-none}" >>"$LOG"
 
 # =============================================================================
@@ -514,7 +595,9 @@ printf 'changes: %s\n' "${CHANGES[*]:-none}" >>"$LOG"
 #     (after allocating huge pages). Huge pages below 100% only warn.
 #     Skipped (no restart) when nothing changed and the service is running.
 # =============================================================================
-if (( ${#CHANGES[@]} == 0 )); then
+if (( STOP )); then
+  : # nothing to test: mining stays stopped
+elif (( ${#CHANGES[@]} == 0 )); then
   step "Checking the service"
   ok "already running, nothing changed, not restarted"
 else
@@ -622,6 +705,52 @@ else
 fi
 
 # =============================================================================
+#  7b. Automatic updates: hourly timer that follows config/auto ("auto" profile).
+#      Set up only after the test passed; removed when another profile is chosen.
+# =============================================================================
+if (( AUTO )); then
+  step "Setting up automatic updates"
+  curl -fsSL -o "$TMP/xmr-auto-update.sh" "$REPO_RAW/xmr-auto-update.sh?t=$(date +%s)"
+  bash -n "$TMP/xmr-auto-update.sh" 2>>"$LOG" || { fail_step; die "xmr-auto-update.sh in the repo has syntax errors"; }
+  cmp -s "$TMP/xmr-auto-update.sh" "$UPDATER" || install -m 755 "$TMP/xmr-auto-update.sh" "$UPDATER"
+  write_if_changed "$REPO_FILE" "$REPO_RAW" || true
+  printf '%s\n' "$PROFILE" >"$AUTO_CURRENT_FILE"
+  rm -f "$AUTO_FAILED_FILE"
+  units_changed=0
+  write_if_changed "$AUTO_SERVICE_FILE" "[Unit]
+Description=XMR Mining automatic update (follows config/auto in the repo)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$UPDATER" && units_changed=1
+  write_if_changed "$AUTO_TIMER_FILE" "[Unit]
+Description=Run the XMR Mining automatic update 5 minutes after boot and every hour on the hour
+
+[Timer]
+OnBootSec=5min
+OnCalendar=hourly
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target" && units_changed=1
+  # A running timer only picks up a new schedule after a restart.
+  if (( units_changed )); then
+    systemctl daemon-reload
+    systemctl restart "${AUTO_NAME}.timer" >>"$LOG" 2>&1 || true
+  fi
+  systemctl enable --now "${AUTO_NAME}.timer" >>"$LOG" 2>&1
+  ok "every hour, following config/auto"
+elif [[ -f $AUTO_TIMER_FILE || -f $UPDATER ]]; then
+  step "Removing automatic updates"
+  systemctl disable --now "${AUTO_NAME}.timer" >>"$LOG" 2>&1 || true
+  rm -f "$AUTO_TIMER_FILE" "$AUTO_SERVICE_FILE" "$UPDATER" "$REPO_FILE" "$AUTO_CURRENT_FILE" "$AUTO_FAILED_FILE"
+  systemctl daemon-reload
+  ok "profile is no longer 'auto'"
+fi
+
+# =============================================================================
 #  8. Remove previous installs (old layout in /home/*/xmrig)
 #     The whole folder is deleted, with all its contents.
 # =============================================================================
@@ -648,10 +777,16 @@ if [[ -f /var/run/reboot-required ]]; then
 fi
 
 echo
-echo "${C_OK}${C_B}Done.${C_0} XMRig v$latest_ver is mining as a service."
-echo "${C_DIM}  Profile: $PROFILE · Worker: $WORKER · Pool: $pool_url"
+if (( STOP )); then
+  echo "${C_OK}${C_B}Done.${C_0} XMRig v$latest_ver is installed; ${C_WARN}mining is stopped${C_0} (config/auto is 'stop')."
+else
+  echo "${C_OK}${C_B}Done.${C_0} XMRig v$latest_ver is mining as a service."
+fi
+echo "${C_DIM}  Profile: $new_label · Worker: $WORKER · Pool: $pool_url"
 echo "  Live log:       journalctl -fu $SERVICE_NAME"
-echo "  Service status: systemctl status $SERVICE_NAME${C_0}"
+echo "  Service status: systemctl status $SERVICE_NAME"
+(( AUTO )) && echo "  Auto updates:   journalctl -u $AUTO_NAME"
+printf '%s' "$C_0"
 echo
 
 if (( ${#REBOOT_REASONS[@]} )); then
