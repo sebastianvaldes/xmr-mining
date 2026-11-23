@@ -30,11 +30,13 @@ curl -fsSL https://raw.githubusercontent.com/sebastianvaldes/xmr-mining/main/min
    - **Connected**: keeps mining. Asks to reboot only when needed (kernel updated or huge pages just configured).
    - **Error**: disables the service, restores the previous XMRig binary and `config.json`, and shows the errors.
    - **Nothing changed** (same XMRig version, config, profile and service) and the service is running: it is not restarted and the backup is left untouched.
+8. With the `auto` profile, sets up the hourly automatic updates (see below); with any other profile, removes them.
 
 ## Configuration and pool profiles
 
 ```
 config/
+  auto                 profile followed by machines in "auto" mode, or "stop"
   base.json            settings shared by every profile (donation, huge pages, ...)
   pools/
     herominers.json    one file per pool profile, with its "pools" list
@@ -57,16 +59,34 @@ The final `config.json` is `base.json` merged with the selected profile. Changes
 
 The installed profile is stored in `/opt/xmrig/profile`.
 
+## Automatic updates (`auto` profile)
+
+Choosing `auto` in the menu (or `bash -s -- auto`) makes the machine follow [`config/auto`](config/auto), a one-line file with a profile name or `stop`. A systemd timer runs `/opt/xmrig/xmr-auto-update.sh` every hour, which:
+
+| `config/auto` | What it does |
+|---|---|
+| a profile (`herominers`, ...) | Builds `config.json` from `base.json` + that profile and installs new XMRig releases. If something changed, restarts the miner and tests it; if the test fails it goes back to the previous version and config (or stays stopped, if it was stopped). A failed change is not retried until the repo or the XMRig release changes. |
+| `stop` | Stops the miner and disables it at boot. It keeps checking every hour, so changing `config/auto` back to a profile resumes mining. |
+
+- The updater only downloads the JSON files and the official XMRig release (SHA256 verified); it never runs code from the repo. It is installed or updated only when `mine-xmr.sh` runs.
+- It does not update the operating system, huge pages or GRUB: run the install command for that.
+- Running the install command while `config/auto` is `stop` updates everything but leaves mining stopped.
+- Choosing any other profile removes the timer and the updater.
+- Log: `journalctl -u xmrig-auto-update`. Next run: `systemctl list-timers xmrig-auto-update`.
+
 ## Files on the machine
 
 | Path | Contents |
 |---|---|
 | `/opt/xmrig/xmrig` | XMRig binary |
 | `/opt/xmrig/config.json` | Generated configuration |
-| `/opt/xmrig/profile` | Installed pool profile |
+| `/opt/xmrig/profile` | Installed pool profile (`auto` in auto mode) |
+| `/opt/xmrig/xmr-auto-update.sh` | Automatic updater (auto mode only) |
+| `/opt/xmrig/repo`, `auto-current`, `auto-failed` | Updater state: repo followed, profile applied, last failed attempt |
 | `/opt/xmrig/backup/` | Previous version (binary + config + profile) |
 | `/opt/xmrig/YYYY-MM-DD-xmr-mining-install.log` | Installer logs (last 20 kept) |
 | `/etc/systemd/system/xmrig.service` | Service |
+| `/etc/systemd/system/xmrig-auto-update.{service,timer}` | Hourly automatic update (auto mode only) |
 | `/etc/sysctl.d/99-xmrig-hugepages.conf` | 2MB huge pages |
 | `/etc/default/grub.d/99-xmrig-hugepages.cfg` | 1GB huge pages |
 | `/etc/modules-load.d/xmrig-msr.conf` | Loads the MSR module |
@@ -83,8 +103,8 @@ sudo systemctl disable xmrig  # don't start at boot
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now xmrig
-sudo rm -rf /opt/xmrig /etc/systemd/system/xmrig.service /etc/sysctl.d/99-xmrig-hugepages.conf /etc/modules-load.d/xmrig-msr.conf
+sudo systemctl disable --now xmrig xmrig-auto-update.timer
+sudo rm -rf /opt/xmrig /etc/systemd/system/xmrig.service /etc/systemd/system/xmrig-auto-update.* /etc/sysctl.d/99-xmrig-hugepages.conf /etc/modules-load.d/xmrig-msr.conf
 sudo rm -f /etc/default/grub.d/99-xmrig-hugepages.cfg && sudo update-grub
 sudo systemctl daemon-reload
 ```
